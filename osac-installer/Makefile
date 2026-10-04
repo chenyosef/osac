@@ -81,6 +81,16 @@ INFRA_CHART    := $(CHARTS)/osac-infra
 OSAC_CHART     := $(CHARTS)/osac
 TOPOLVM_REPO := https://topolvm.github.io/topolvm
 
+# Helm 4 defaults new releases to server-side apply. The devstack chart patches
+# the AWX operator Deployment and AWX itself mutates its CR labels, so keep this
+# release on client-side updates to avoid field ownership conflicts. Helm 3
+# already uses client-side updates and does not support the Helm 4 flag.
+HELM_VERSION_MAJOR := $(shell helm version --template '{{.Version}}' 2>/dev/null | cut -d. -f1 | sed 's/^v//')
+DEVSTACK_HELM_APPLY_ARGS :=
+ifeq ($(HELM_VERSION_MAJOR),4)
+DEVSTACK_HELM_APPLY_ARGS := --server-side=false
+endif
+
 # Values file selection: kind uses kind-specific files, OpenShift uses profile files.
 # dev-full reuses the dev control-plane values, plus an overlay that disables
 # AAP-based networking provisioning and enables its local TopoLVM StorageClass.
@@ -361,6 +371,7 @@ endif
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
 		--post-renderer $(DEV_FULL_HELM_POST_RENDERER) \
+		$(DEVSTACK_HELM_APPLY_ARGS) \
 		--wait --timeout 30m
 
 ##@ Composite
