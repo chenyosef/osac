@@ -251,7 +251,10 @@ so networking resources reconcile to READY without a real fabric (kind has none)
 **Prerequisites** (beyond the base tools) — enforced by `scripts/dev-full/kind-runtime.sh check`:
 
 - A **rootful** container runtime, because KubeVirt chowns `/dev/kvm`:
-  - **Linux host** — rootful podman (invoked via `sudo`) or Docker
+  - **Linux host** — rootful Podman (using `sudo` or an accessible rootful socket) or Docker.
+    For sudo, authenticate once with `sudo -v` before starting the install. Rootless
+    Podman, including the socket started by `systemctl --user start podman.socket`,
+    cannot provide the TopoLVM loop device and volume group used by this profile.
   - **Linux + Distrobox** — the rootful podman host socket (`/run/podman/podman.sock`);
     install the drop-in at `scripts/dev-full/manifests/podman-socket-rootful.conf`
   - **macOS** — Docker Desktop or Podman Desktop. For Podman, start its machine and
@@ -262,6 +265,81 @@ so networking resources reconcile to READY without a real fabric (kind has none)
   On Apple Silicon, an explicit `CONTAINER_TOOL=docker|podman` selects the same
   runtime for installer operations when `KIND_EXPERIMENTAL_PROVIDER` is unset;
   the latter takes precedence when both are provided.
+
+For a Podman-backed install, select Podman explicitly and use a rootful Podman
+runtime on Linux:
+
+```bash
+export CONTAINER_TOOL=podman
+export KIND_EXPERIMENTAL_PROVIDER=podman
+make install PLATFORM=kind PROFILE=dev-full NS=osac
+```
+
+`dev-full` installs TopoLVM as the tenant `local` storage backend. Before Kind
+is created, `kind-runtime.sh` prepares a disposable 20 GiB sparse disk, the
+`vg1` volume group, and an external `lvmd` process. Linux stores these at
+`/var/lib/osac-dev-full/topolvm` on the host. Docker Desktop and Podman Desktop
+store them at the same path inside the selected Linux VM. Podman Desktop needs
+a rootful machine; switch the machine to rootful mode in Podman Desktop and
+restart it before installing.
+
+The `topolvm-provisioner` StorageClass is not the cluster default. Kind's
+`standard` class remains the default for dev-stack components such as AWX
+PostgreSQL. OSAC registers the existing `local` storage tier. AWX's storage
+templates create a tenant-labeled class for that tier, and the operator passes
+the tenant's resolved class to compute provisioning.
+
+Kind mounts are fixed when the cluster is created. If `install-infra` finds an
+existing cluster without the required dev-full TopoLVM mounts, it stops with an
+instruction to recreate the cluster and leaves it intact. Run the dev-full
+uninstall and install sequence to recreate it. Uninstalling dev-full also stops
+`lvmd` and removes the `vg1` backing file and volumes; treat this local storage
+as disposable.
+
+After installation, check the classes and TopoLVM workloads:
+
+```bash
+kubectl get storageclass standard topolvm-provisioner
+kubectl get pods -n osac-infra -l app.kubernetes.io/name=topolvm
+```
+
+To exercise provisioning, create a PVC with a pod that consumes it. The class
+uses `WaitForFirstConsumer`, so the PVC binds after a pod is scheduled:
+
+```bash
+kubectl apply -n osac -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: topolvm-smoke
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: topolvm-provisioner
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: topolvm-smoke
+spec:
+  containers:
+    - name: test
+      image: busybox:1.36
+      command: ["sh", "-c", "touch /data/smoke && sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: topolvm-smoke
+EOF
+kubectl wait --for=condition=Bound pvc/topolvm-smoke -n osac --timeout=5m
+kubectl wait --for=condition=Ready pod/topolvm-smoke -n osac --timeout=5m
+kubectl delete pod,pvc topolvm-smoke -n osac
+```
 
 On an Apple Silicon Mac, either Kind profile automatically builds an arm64
 replacement for `quay.io/openshift/origin-cli:4.20.0` with the selected

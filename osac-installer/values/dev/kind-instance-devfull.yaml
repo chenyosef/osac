@@ -17,6 +17,11 @@ operator:
     storage: true
     volume: true
 
+# Reuse the local storage registration hook so tenant onboarding provisions a
+# tenant-labeled TopoLVM StorageClass for the existing "local" storage tier.
+lvms:
+  enabled: true
+
 # --- CSI Driver & Backends ---
 # Enable the OSAC CSI driver for persistent volume provisioning via storage tiers.
 # The hub runtime ConfigMap and shared credential Secret configure fulfillment;

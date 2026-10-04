@@ -79,18 +79,22 @@ CHARTS         := charts
 DEPS_CHART     := $(CHARTS)/osac-deps
 INFRA_CHART    := $(CHARTS)/osac-infra
 OSAC_CHART     := $(CHARTS)/osac
+TOPOLVM_REPO := https://topolvm.github.io/topolvm
 
 # Values file selection: kind uses kind-specific files, OpenShift uses profile files.
-# dev-full reuses the identical dev control-plane values, plus a small overlay that
-# disables AAP-based networking provisioning (no fabric on kind).
+# dev-full reuses the dev control-plane values, plus an overlay that disables
+# AAP-based networking provisioning and enables its local TopoLVM StorageClass.
 INSTANCE_VALUES_EXTRA :=
 INFRA_VALUES_EXTRA :=
+INFRA_HELM_ARGS :=
 ifeq ($(PLATFORM),kind)
 INFRA_VALUES    := values/dev/kind-infra.yaml
 INSTANCE_VALUES := values/dev/kind-instance.yaml
 ifeq ($(PROFILE),dev-full)
 INSTANCE_VALUES_EXTRA := -f values/dev/kind-instance-devfull.yaml
 INFRA_VALUES_EXTRA := -f values/dev/kind-infra-devfull.yaml
+# Keep the OpenShift LVMS operator off on Kind and enable its TopoLVM CSI path.
+INFRA_HELM_ARGS := --set topolvm.enabled=true --set lvms.enabled=false
 endif
 else ifdef PROFILE
 INFRA_VALUES    := values/$(PROFILE)/infra.yaml
@@ -136,10 +140,15 @@ KIND_RUNTIME_PROVIDER := $(notdir $(CONTAINER_TOOL))
 endif
 endif
 endif
-KIND_RUNTIME_ENV := $(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
+KIND_RUNTIME_ENV := KIND_PROFILE=$(PROFILE) \
+	KIND_OSAC_NAMESPACE=$(NS) \
+	$(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
 KIND_RUNTIME_CMD := $(KIND_RUNTIME_ENV) $(KIND_RUNTIME)
 KIND_CLUSTER_NAME ?= osac-dev
 KIND_CONFIG := kind-config.yaml
+ifeq ($(PROFILE),dev-full)
+KIND_CONFIG := kind-config-dev-full.yaml
+endif
 # dev-full runs its cluster in a separate (rootful) podman daemon; give it a
 # distinct kubeconfig so it never collides with the rootless PROFILE=dev cluster
 # of the same name (both would otherwise share this one file and clobber it).
@@ -206,7 +215,7 @@ kind-load-images: ## Load previously built dev-full images into Kind (PLATFORM=k
 ##@ Entity: Infra
 
 .PHONY: install-infra
-install-infra: ## Install infrastructure (PLATFORM= PROFILE= NS= required)
+install-infra: helm-infra-deps ## Install infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_CMD) check
@@ -242,6 +251,7 @@ endif
 		--namespace osac-infra --create-namespace \
 		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
+		$(INFRA_HELM_ARGS) \
 		--wait-for-jobs --timeout 30m \
 	|| { echo "=== osac-infra hook jobs ==="; kubectl get jobs,pods,cm -n osac-infra || true; kubectl logs -n osac-infra -l job-name=osac-infra-apply-ca-bundle --tail=200 || true; kubectl get deploy,endpoints,certificate -n cert-manager || true; exit 1; }
 	@for f in ../osac-operator/config/crd/fakes/*.yaml; do \
@@ -417,8 +427,15 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 
 .PHONY: helm-deps
 helm-deps: ## Build Helm chart dependencies
+	$(MAKE) helm-infra-deps
 	helm dependency build $(OSAC_CHART)
 	helm dependency build charts/osac-devstack
+
+.PHONY: helm-infra-deps
+helm-infra-deps: ## Build osac-infra Helm dependencies
+	helm repo add topolvm $(TOPOLVM_REPO) --force-update
+	helm repo update topolvm
+	helm dependency build $(INFRA_CHART)
 
 .PHONY: helm-lint
 helm-lint: helm-deps ## Lint all charts
