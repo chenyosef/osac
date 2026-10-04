@@ -352,7 +352,7 @@ uninstall-osac: ## Uninstall OSAC instance (PLATFORM= PROFILE= NS= required)
 ##@ Entity: Dev Stack (kind PROFILE=dev-full only)
 
 .PHONY: install-devstack
-install-devstack: ## Install dev-full extras: KubeVirt/CDI/Multus + AWX + UI + seeded catalog
+install-devstack: helm-devstack-deps ## Install dev-full extras: KubeVirt/CDI/Multus + AWX + UI + seeded catalog
 ifneq ($(PLATFORM)/$(PROFILE),kind/dev-full)
 	@echo "ERROR: install-devstack requires PLATFORM=kind PROFILE=dev-full" >&2; exit 1
 endif
@@ -440,13 +440,17 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 helm-deps: ## Build Helm chart dependencies
 	$(MAKE) helm-infra-deps
 	helm dependency build $(OSAC_CHART)
-	helm dependency build charts/osac-devstack
+	$(MAKE) helm-devstack-deps
 
 .PHONY: helm-infra-deps
 helm-infra-deps: ## Build osac-infra Helm dependencies
 	helm repo add topolvm $(TOPOLVM_REPO) --force-update
 	helm repo update topolvm
 	helm dependency build $(INFRA_CHART)
+
+.PHONY: helm-devstack-deps
+helm-devstack-deps: ## Build osac-devstack Helm dependencies
+	helm dependency build $(CHARTS)/osac-devstack
 
 .PHONY: helm-lint
 helm-lint: helm-deps ## Lint all charts

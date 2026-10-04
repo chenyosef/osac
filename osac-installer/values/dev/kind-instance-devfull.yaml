@@ -10,6 +10,9 @@
 # controller itself stays enabled (kind-instance.yaml: operator.controllers.networking=true)
 # so it still runs and marks resources Ready.
 operator:
+  aap:
+    # dev-full deploys AWX in the osac namespace, unlike the plain dev profile.
+    url: "http://awx-service.osac.svc.cluster.local:80/api"
   image:
     pullPolicy: IfNotPresent
   controllers:

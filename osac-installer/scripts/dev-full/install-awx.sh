@@ -132,17 +132,9 @@ configure_awx() {
   done
   log "AWX project synced: ${proj_status}"
 
-  # Compute-instance job templates (real playbooks).
-  # Dev-full storage fallback: the compute-instance playbook resolves a
-  # StorageClass by matching its requested tier (_requested_storage_tier,
-  # default 'local') against this injected tenant_storage_classes list. On kind
-  # the only StorageClass is 'standard' (rancher.io/local-path) and the
-  # LVMS-backed 'local' StorageTier hook (register-local-storage.yaml) is
-  # skipped, so nothing populates the tenant's status.storageClasses. We inject
-  # the list here as a job-template extra_var (which outranks the playbook's
-  # osac_job_vars-derived value) so provisioning works without a real storage
-  # backend. The tier MUST be 'local' to match the playbook's requested tier —
-  # a mismatched tier name fails the run ("tier not available").
+  # Compute-instance job templates (real playbooks). Leave storage-class
+  # variables unset here; the operator supplies the tenant's resolved classes
+  # under osac_job_vars whenever it launches a compute job.
   #
   # We deliberately do NOT inject tenant_target_namespace / compute_instance_target_namespace
   # here. As top-level extra_vars they would OUTRANK the ocp_virt_vm role's own
@@ -154,10 +146,6 @@ configure_awx() {
   # stuck at Provisioned=False/WaitingForVM forever. Let the role resolve it; the
   # subnet namespace itself is created by provision-tenant.sh (subnet provisioning
   # is a noop on kind, so nothing else creates it).
-  local compute_extra_vars
-  compute_extra_vars="tenant_storage_classes:
-  - name: standard
-    tier: local"
   local entry name playbook
   for entry in \
     "osac-create-compute-instance:osac-aap/playbook_osac_create_compute_instance.yml" \
@@ -167,8 +155,24 @@ configure_awx() {
       -H "Content-Type: application/json" -d "{
         \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
         \"project\": ${project_id}, \"playbook\": \"${playbook}\",
-        \"ask_variables_on_launch\": true,
-        \"extra_vars\": $(echo "${compute_extra_vars}" | jq -Rs .)
+        \"ask_variables_on_launch\": true
+      }" >/dev/null
+    log "  template: ${name}"
+  done
+
+  # Storage templates used by the operator to provision the registered
+  # tenant backend and create tenant-labeled StorageClasses for each tier.
+  for entry in \
+    "osac-create-tenant-storage-backend:osac-aap/playbook_osac_create_tenant_storage_backend.yml" \
+    "osac-delete-tenant-storage-backend:osac-aap/playbook_osac_delete_tenant_storage_backend.yml" \
+    "osac-create-tenant-cluster-storage:osac-aap/playbook_osac_create_tenant_cluster_storage.yml" \
+    "osac-delete-tenant-cluster-storage:osac-aap/playbook_osac_delete_tenant_cluster_storage.yml"; do
+    name="${entry%%:*}"; playbook="${entry##*:}"
+    curl -s -X POST "${api}/job_templates/" -H "Authorization: Bearer ${awx_token}" \
+      -H "Content-Type: application/json" -d "{
+        \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
+        \"project\": ${project_id}, \"playbook\": \"${entry##*:}\",
+        \"ask_variables_on_launch\": true, \"allow_simultaneous\": false
       }" >/dev/null
     log "  template: ${name}"
   done
