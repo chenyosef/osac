@@ -29,6 +29,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pw
 TOPOLVM_RUNTIME_DIR="/var/lib/osac-dev-full/topolvm"
 TOPOLVM_LVMD_IMAGE="osac-dev/topolvm-lvmd:0.41.1-hostpid"
 TOPOLVM_LVMD_CONTAINER="osac-dev-full-topolvm-lvmd"
+PODMAN_MODE="unset"
 
 # Auto-detect container runtime (prefer Podman when available, Docker otherwise).
 if command -v podman >/dev/null 2>&1; then
@@ -53,52 +54,89 @@ info() { echo -e "${BLUE}[i]${NC} $*" >&2; }
 
 # ── Runtime mode detection ───────────────────────────────────────────────────
 detect_podman_mode() {
+  [[ "$KIND_PROVIDER" == "podman" ]] || return 0
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+
   if [[ "$IN_DISTROBOX" == "true" ]]; then
-    if distrobox-host-exec env CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" \
+    if [[ -S "$ROOTFUL_SOCKET" ]] && distrobox-host-exec env CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" \
          podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
-      export PODMAN_ROOTFUL=1
-      info "Using rootful podman via ${ROOTFUL_SOCKET}"
+      PODMAN_MODE="socket"
+      info "Using rootful Podman via ${ROOTFUL_SOCKET}"
     else
-      export PODMAN_ROOTFUL=0
-      warn "Rootful podman socket not available — using rootless (KubeVirt will fail)."
-      warn "Install the host socket override (see scripts/dev-full/manifests/podman-socket-rootful.conf):"
-      warn "  sudo install -m 0644 podman-socket-rootful.conf \\"
-      warn "    /etc/systemd/system/podman.socket.d/rootful-group.conf"
-      warn "  sudo systemctl daemon-reload && sudo systemctl restart podman.socket"
+      PODMAN_MODE="rootless"
     fi
+  elif [[ -S "$ROOTFUL_SOCKET" ]] && \
+       CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
+    PODMAN_MODE="socket"
+    info "Using rootful Podman via ${ROOTFUL_SOCKET}"
+  elif sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
+    PODMAN_MODE="sudo"
+    info "Using local rootful Podman via sudo"
+  else
+    PODMAN_MODE="rootless"
+  fi
+
+  if [[ "${KIND_PROFILE:-}" == "dev-full" && "$PODMAN_MODE" != "socket" && "$PODMAN_MODE" != "sudo" ]]; then
+    err "Kind dev-full requires a reachable rootful Podman engine for the TopoLVM loop device and KubeVirt."
+    err "A rootless Podman engine or the socket started by 'systemctl --user start podman.socket' is not sufficient."
+    if [[ "$IN_DISTROBOX" == "true" ]]; then
+      err "Ask the host administrator to enable ${ROOTFUL_SOCKET} for your user; see scripts/dev-full/manifests/podman-socket-rootful.conf."
+    else
+      err "Run 'sudo -v' with a working sudo account, or ask the host administrator to configure an accessible rootful socket at ${ROOTFUL_SOCKET}."
+    fi
+    exit 1
   fi
 }
 
 kind_cmd() {
+  if [[ "$KIND_PROVIDER" == "podman" && "$PODMAN_MODE" == "unset" ]]; then
+    detect_podman_mode
+  fi
   if [[ "$KIND_PROVIDER" == "docker" || "$(uname -s)" == "Darwin" ]]; then
     KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
-  elif [[ "$IN_DISTROBOX" == "true" ]]; then
-    if [[ "${PODMAN_ROOTFUL:-0}" == "1" ]]; then
+  elif [[ "$PODMAN_MODE" == "socket" ]]; then
+    if [[ "$IN_DISTROBOX" == "true" ]]; then
       systemd-run --scope --user \
         env KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" \
         CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" \
         kind "$@"
     else
-      systemd-run --scope --user \
-        env KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" \
-        kind "$@"
+      KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" \
+        CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" kind "$@"
     fi
+  elif [[ "$IN_DISTROBOX" == "true" ]]; then
+    systemd-run --scope --user \
+      env KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" \
+      kind "$@"
+  elif [[ "$PODMAN_MODE" == "sudo" ]]; then
+    sudo -n KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
   else
-    sudo KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
+    KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
   fi
 }
 
 container_cmd() {
+  if [[ "$KIND_PROVIDER" == "podman" && "$PODMAN_MODE" == "unset" ]]; then
+    detect_podman_mode
+  fi
   if [[ "$KIND_PROVIDER" == "docker" ]]; then
     docker "$@"
   elif [[ "$(uname -s)" == "Darwin" ]]; then
     # Podman Desktop exposes the machine connection to the invoking user.
     # sudo would select root's connection instead and cannot reach that socket.
     podman "$@"
+  elif [[ "$PODMAN_MODE" == "socket" ]]; then
+    if [[ "$IN_DISTROBOX" == "true" ]]; then
+      distrobox-host-exec env CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" podman "$@"
+    else
+      CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" podman "$@"
+    fi
   elif [[ "$IN_DISTROBOX" == "true" ]]; then
-    podman "$@"   # the distrobox wrapper honours PODMAN_ROOTFUL / CONTAINER_HOST
+    podman "$@"
+  elif [[ "$PODMAN_MODE" == "sudo" ]]; then
+    sudo -n podman "$@"
   else
-    sudo podman "$@"
+    podman "$@"
   fi
 }
 
@@ -340,30 +378,33 @@ check_prerequisites() {
 
   # Container runtime reachability.
   if [[ "$KIND_PROVIDER" == "podman" ]]; then
+    detect_podman_mode
     if ! container_cmd info >/dev/null 2>&1; then
-      err "Podman is not reachable. Ensure the podman socket is active."
-      err "  Host:      systemctl --user start podman.socket (or use rootful, see below)"
-      err "  Distrobox: install the host rootful socket override (manifests/podman-socket-rootful.conf)"
+      err "Podman is not reachable through the selected ${PODMAN_MODE} runtime."
+      if [[ "${KIND_PROFILE:-}" == "dev-full" ]]; then
+        err "Check that the rootful Podman service/socket is running and accessible, then rerun the install."
+      elif [[ "$IN_DISTROBOX" == "true" ]]; then
+        err "Distrobox: start the host Podman socket or install the rootful socket override (scripts/dev-full/manifests/podman-socket-rootful.conf)."
+      else
+        err "Host: start Podman with 'systemctl --user start podman.socket' for rootless profiles."
+      fi
       exit 1
     fi
-    detect_podman_mode
+    if [[ "${KIND_PROFILE:-}" == "dev-full" && "$(uname -s)" == "Darwin" ]]; then
+      local podman_rootless
+      podman_rootless=$(container_cmd info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
+      if [[ "${podman_rootless}" != "false" ]]; then
+        err "Kind dev-full requires a rootful Podman Desktop machine to manage the TopoLVM loop device."
+        err "Switch the machine to rootful mode in Podman Desktop, then restart it and retry."
+        exit 1
+      fi
+    fi
   else
     if ! docker info >/dev/null 2>&1; then
       err "Docker is not running. Start Docker Desktop or the Docker daemon."
       exit 1
     fi
-  fi
-
-  # dev-full needs rootful device access for TopoLVM loop devices.
-  if [[ "${KIND_PROFILE:-}" == "dev-full" ]]; then
-    if [[ "$KIND_PROVIDER" == "podman" ]]; then
-      local podman_rootless
-      podman_rootless=$(container_cmd info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
-      if [[ "${podman_rootless}" != "false" ]]; then
-        err "Kind dev-full requires a rootful Podman engine to manage the TopoLVM loop device."
-        exit 1
-      fi
-    elif docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -qi rootless; then
+    if [[ "${KIND_PROFILE:-}" == "dev-full" ]] && docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -qi rootless; then
       err "Kind dev-full requires a rootful Docker daemon to manage the TopoLVM loop device."
       exit 1
     fi
