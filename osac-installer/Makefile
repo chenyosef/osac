@@ -95,6 +95,7 @@ endif
 # dev-full reuses the dev control-plane values, plus an overlay that disables
 # AAP-based networking provisioning and enables its local TopoLVM StorageClass.
 INSTANCE_VALUES_EXTRA :=
+INSTANCE_HELM_ARGS :=
 INFRA_VALUES_EXTRA :=
 INFRA_HELM_ARGS :=
 ifeq ($(PLATFORM),kind)
@@ -102,6 +103,8 @@ INFRA_VALUES    := values/dev/kind-infra.yaml
 INSTANCE_VALUES := values/dev/kind-instance.yaml
 ifeq ($(PROFILE),dev-full)
 INSTANCE_VALUES_EXTRA := -f values/dev/kind-instance-devfull.yaml
+# AWX and the OSAC operator share NS; build the in-cluster URL from the selected namespace.
+INSTANCE_HELM_ARGS := --set-string operator.aap.url=http://awx-service.$(NS).svc.cluster.local:80/api
 INFRA_VALUES_EXTRA := -f values/dev/kind-infra-devfull.yaml
 # Keep the OpenShift LVMS operator off on Kind and enable its TopoLVM CSI path.
 INFRA_HELM_ARGS := --set topolvm.enabled=true --set lvms.enabled=false
@@ -342,6 +345,7 @@ endif
 		--namespace $(NS) --create-namespace \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(DOMAIN),--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DOMAIN) --set global.clusterDomain=$(DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DOMAIN)/realms/osac) \
+		$(INSTANCE_HELM_ARGS) \
 		$(EXTRA_HELM_ARGS) \
 		--wait --timeout 40m
 
