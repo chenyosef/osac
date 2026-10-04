@@ -27,8 +27,17 @@ set -euo pipefail
 ROOTFUL_SOCKET="${ROOTFUL_SOCKET:-/run/podman/podman.sock}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 TOPOLVM_RUNTIME_DIR="/var/lib/osac-dev-full/topolvm"
-TOPOLVM_LVMD_IMAGE="osac-dev/topolvm-lvmd:0.41.1-hostpid"
+TOPOLVM_LVMD_IMAGE="osac-dev/topolvm-lvmd:0.41.1-container"
 TOPOLVM_LVMD_CONTAINER="osac-dev-full-topolvm-lvmd"
+TOPOLVM_LVM_DEVICE_ARGS=(
+  --cap-drop=ALL
+  --cap-add=SYS_ADMIN
+  --cap-add=MKNOD
+  --device-cgroup-rule "b 7:* rwm"
+  --device-cgroup-rule "c 10:236 rwm"
+  --device-cgroup-rule "c 10:237 rwm"
+  --device-cgroup-rule "b 253:* rwm"
+)
 PODMAN_MODE="unset"
 
 # Auto-detect container runtime (prefer Podman when available, Docker otherwise).
@@ -171,7 +180,7 @@ ensure_topolvm_runtime_dir() {
   # Bind mounts need their source directory to exist in the container runtime's
   # Linux filesystem. This also works with remote Docker/Podman Desktop engines,
   # where the path is inside the engine VM rather than on the invoking host.
-  container_cmd run --rm --privileged \
+  container_cmd run --rm \
     --volume /var/lib:/host-var-lib \
     "${TOPOLVM_LVMD_IMAGE}" \
     mkdir -p "/host-var-lib/${runtime_dir_relative}/socket" \
@@ -227,7 +236,7 @@ device-classes:
     spare-gb: 1
 EOF'
 
-  container_cmd run --rm --privileged \
+  container_cmd run --rm "${TOPOLVM_LVM_DEVICE_ARGS[@]}" \
     --volume "${TOPOLVM_RUNTIME_DIR}:/runtime" \
     --volume /dev:/dev \
     "${TOPOLVM_LVMD_IMAGE}" bash -euo pipefail -c "${setup_script}"
@@ -251,12 +260,12 @@ start_topolvm_lvmd() {
 
   if [[ "${running}" != "true" ]]; then
     container_cmd run --detach --name "${TOPOLVM_LVMD_CONTAINER}" \
-      --restart unless-stopped --privileged --pid=host \
+      --restart unless-stopped "${TOPOLVM_LVM_DEVICE_ARGS[@]}" \
       --volume /dev:/dev \
       --volume "${TOPOLVM_RUNTIME_DIR}/socket:/run/topolvm" \
       --volume "${TOPOLVM_RUNTIME_DIR}/lvmd.yaml:/etc/topolvm/lvmd.yaml:ro" \
       "${TOPOLVM_LVMD_IMAGE}" \
-      /usr/local/bin/lvmd --config=/etc/topolvm/lvmd.yaml >/dev/null
+      /usr/local/bin/lvmd --container --config=/etc/topolvm/lvmd.yaml >/dev/null
   fi
 
   if [[ "${restart_existing}" == "true" ]] && ! container_cmd exec "${TOPOLVM_LVMD_CONTAINER}" \
@@ -353,7 +362,7 @@ if [[ -n "$loopdev" ]]; then
   losetup --detach "$loopdev"
 fi
 rm -rf /runtime/*'
-  container_cmd run --rm --privileged \
+  container_cmd run --rm "${TOPOLVM_LVM_DEVICE_ARGS[@]}" \
     --volume "${TOPOLVM_RUNTIME_DIR}:/runtime" \
     --volume /dev:/dev \
     "${TOPOLVM_LVMD_IMAGE}" bash -euo pipefail -c "${cleanup_script}"

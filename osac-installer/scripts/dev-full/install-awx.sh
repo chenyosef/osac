@@ -149,17 +149,53 @@ configure_awx() {
   # stuck at Provisioned=False/WaitingForVM forever. Let the role resolve it; the
   # subnet namespace itself is created by provision-tenant.sh (subnet provisioning
   # is a noop on kind, so nothing else creates it).
-  local entry name playbook
+  local entry name playbook template_id template_payload
   for entry in \
     "osac-create-compute-instance:osac-aap/playbook_osac_create_compute_instance.yml" \
     "osac-delete-compute-instance:osac-aap/playbook_osac_delete_compute_instance.yml"; do
     name="${entry%%:*}"; playbook="${entry##*:}"
-    curl -s -X POST "${api}/job_templates/" -H "Authorization: Bearer ${awx_token}" \
-      -H "Content-Type: application/json" -d "{
-        \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
-        \"project\": ${project_id}, \"playbook\": \"${playbook}\",
-        \"extra_vars\": \"{}\", \"ask_variables_on_launch\": true
-      }" >/dev/null
+    template_id=$(curl -fsS -G "${api}/job_templates/" \
+      -H "Authorization: Bearer ${awx_token}" \
+      --data-urlencode "name=${name}" | \
+      python3 -c '
+import json
+import sys
+
+name = sys.argv[1]
+matches = [
+    str(template["id"])
+    for template in json.load(sys.stdin).get("results", [])
+    if template.get("name") == name and template.get("organization") == 1
+]
+if len(matches) > 1:
+    raise SystemExit(f"multiple AWX job templates named {name!r} in organization 1")
+print(matches[0] if matches else "")
+' "${name}")
+    if [[ -n "${template_id}" ]]; then
+      curl -fsS -X PATCH "${api}/job_templates/${template_id}/" \
+        -H "Authorization: Bearer ${awx_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"extra_vars":"{}"}' >/dev/null
+    else
+      template_payload=$(python3 -c '
+import json
+import sys
+
+print(json.dumps({
+    "name": sys.argv[1],
+    "organization": 1,
+    "inventory": int(sys.argv[3]),
+    "project": int(sys.argv[4]),
+    "playbook": sys.argv[2],
+    "extra_vars": "{}",
+    "ask_variables_on_launch": True,
+}))
+' "${name}" "${playbook}" "${inv_id}" "${project_id}")
+      curl -fsS -X POST "${api}/job_templates/" \
+        -H "Authorization: Bearer ${awx_token}" \
+        -H "Content-Type: application/json" \
+        -d "${template_payload}" >/dev/null
+    fi
     log "  template: ${name}"
   done
 

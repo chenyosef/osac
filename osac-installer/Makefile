@@ -80,6 +80,11 @@ DEPS_CHART     := $(CHARTS)/osac-deps
 INFRA_CHART    := $(CHARTS)/osac-infra
 OSAC_CHART     := $(CHARTS)/osac
 TOPOLVM_REPO := https://topolvm.github.io/topolvm
+TOPOLVM_CHART_VERSION := 17.2.0
+TOPOLVM_CHART_PACKAGE := $(INFRA_CHART)/charts/topolvm-$(TOPOLVM_CHART_VERSION).tgz
+AWX_OPERATOR_REPO := https://ansible-community.github.io/awx-operator-helm/
+# The osac chart only has local file:// dependencies; ignore user Helm repos.
+LOCAL_HELM_REPOSITORY_CONFIG := /dev/null
 
 # Helm 4 defaults new releases to server-side apply. The devstack chart patches
 # the AWX operator Deployment and AWX itself mutates its CR labels, so keep this
@@ -325,7 +330,7 @@ AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 
 .PHONY: install-osac
 install-osac: ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
-	helm dependency build $(OSAC_CHART)
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
 ifneq ($(PLATFORM),kind)
 	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
 	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
@@ -340,7 +345,7 @@ ifneq ($(PLATFORM),kind)
 	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'))
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: Could not determine cluster domain. Is oc logged in?" >&2; exit 1; }
 endif
-	helm upgrade --install osac $(OSAC_CHART) \
+	@helm upgrade --install osac $(OSAC_CHART) \
 		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) --create-namespace \
 		--set-string global.osacDeploymentId=$(NS)/osac \
@@ -443,18 +448,30 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 .PHONY: helm-deps
 helm-deps: ## Build Helm chart dependencies
 	$(MAKE) helm-infra-deps
-	helm dependency build $(OSAC_CHART)
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
 	$(MAKE) helm-devstack-deps
 
 .PHONY: helm-infra-deps
-helm-infra-deps: ## Build osac-infra Helm dependencies
+helm-infra-deps: ## Verify vendored osac-infra Helm dependencies
+	@test -f "$(TOPOLVM_CHART_PACKAGE)" || { \
+		echo "ERROR: packaged TopoLVM chart $(TOPOLVM_CHART_PACKAGE) is missing" >&2; \
+		exit 1; \
+	}
+	@actual_version=$$(helm show chart "$(TOPOLVM_CHART_PACKAGE)" | awk '$$1 == "version:" { version = $$2 } END { print version }'); \
+	if [ "$$actual_version" != "$(TOPOLVM_CHART_VERSION)" ]; then \
+		echo "ERROR: expected TopoLVM chart version $(TOPOLVM_CHART_VERSION), got $$actual_version" >&2; \
+		exit 1; \
+	fi
+
+.PHONY: helm-topolvm-deps
+helm-topolvm-deps: ## Refresh the vendored TopoLVM chart from its upstream repository
 	helm repo add topolvm $(TOPOLVM_REPO) --force-update
-	helm repo update topolvm
-	helm dependency build $(INFRA_CHART)
+	helm dependency update --skip-refresh $(INFRA_CHART)
 
 .PHONY: helm-devstack-deps
 helm-devstack-deps: ## Build osac-devstack Helm dependencies
-	helm dependency build $(CHARTS)/osac-devstack
+	helm repo add awx-operator $(AWX_OPERATOR_REPO) --force-update
+	helm dependency build --skip-refresh $(CHARTS)/osac-devstack
 
 .PHONY: helm-lint
 helm-lint: helm-deps ## Lint all charts
