@@ -158,7 +158,7 @@ configure_awx() {
       -H "Content-Type: application/json" -d "{
         \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
         \"project\": ${project_id}, \"playbook\": \"${playbook}\",
-        \"ask_variables_on_launch\": true
+        \"extra_vars\": \"{}\", \"ask_variables_on_launch\": true
       }" >/dev/null
     log "  template: ${name}"
   done
@@ -175,7 +175,8 @@ configure_awx() {
       -H "Content-Type: application/json" -d "{
         \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
         \"project\": ${project_id}, \"playbook\": \"${entry##*:}\",
-        \"ask_variables_on_launch\": true, \"allow_simultaneous\": false
+        \"extra_vars\": \"{}\", \"ask_variables_on_launch\": true,
+        \"allow_simultaneous\": false
       }" >/dev/null
     log "  template: ${name}"
   done
@@ -193,7 +194,7 @@ configure_awx() {
       -H "Content-Type: application/json" -d "{
         \"name\": \"${name}\", \"organization\": 1, \"inventory\": ${inv_id},
         \"project\": ${project_id}, \"playbook\": \"${playbook}\",
-        \"ask_variables_on_launch\": true
+        \"extra_vars\": \"{}\", \"ask_variables_on_launch\": true
       }" >/dev/null
     log "  template: ${name}"
   done

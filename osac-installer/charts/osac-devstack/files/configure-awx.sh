@@ -55,6 +55,7 @@ print(json.dumps({
     "inventory": int(inventory),
     "project": int(project),
     "playbook": playbook,
+    "extra_vars": "{}",
     "ask_variables_on_launch": True,
     "allow_simultaneous": False,
 }))
