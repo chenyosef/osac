@@ -103,12 +103,15 @@ configure_awx() {
   # Project from the osac mono-repo. osac-aap playbooks live under osac-aap/, and
   # AWX's Project API always clones the whole repo, so playbook paths below are
   # prefixed with osac-aap/.
+  # Remove the cached checkout before syncing: the repo's graph-latest tag moves,
+  # and Git rejects a fetch when that tag differs from AWX's stale local tag.
   local project_id
   project_id=$(curl -s -X POST "${api}/projects/" -H "Authorization: Bearer ${awx_token}" \
     -H "Content-Type: application/json" -d '{
       "name": "osac-aap", "organization": 1, "scm_type": "git",
       "scm_url": "https://github.com/osac-project/osac.git",
-      "scm_branch": "main", "scm_update_on_launch": false
+      "scm_branch": "main", "scm_update_on_launch": false,
+      "scm_delete_on_update": true
     }' | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
   if [[ -z "$project_id" ]]; then
     project_id=$(curl -s -H "Authorization: Bearer ${awx_token}" "${api}/projects/?name=osac-aap" | \
@@ -117,7 +120,7 @@ configure_awx() {
       # A project surviving a pre-mono-repo run may still point at the old repo.
       curl -s -X PATCH "${api}/projects/${project_id}/" -H "Authorization: Bearer ${awx_token}" \
         -H "Content-Type: application/json" \
-        -d '{"scm_url": "https://github.com/osac-project/osac.git", "scm_branch": "main"}' >/dev/null
+        -d '{"scm_url": "https://github.com/osac-project/osac.git", "scm_branch": "main", "scm_delete_on_update": true}' >/dev/null
       curl -s -X POST "${api}/projects/${project_id}/update/" -H "Authorization: Bearer ${awx_token}" >/dev/null
     fi
   fi
