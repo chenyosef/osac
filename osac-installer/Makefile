@@ -184,7 +184,7 @@ export KUBECONFIG := $(or $(KUBECONFIG),$(KIND_KUBECONFIG))
 KIND_UI_IMAGE := ghcr.io/osac-project/osac-ui:latest
 KIND_LOAD_IMAGE_SCRIPT ?= $(abspath scripts/dev-full/kind-load-image.sh)
 define kind-load-ui-image
-	NS="$(NS)" \
+	$(KIND_RUNTIME_ENV) NS="$(NS)" \
 	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" KUBECONFIG="$(KUBECONFIG)" \
 	CONTAINER_TOOL="$(CONTAINER_TOOL)" "$(KIND_LOAD_IMAGE_SCRIPT)" "$(1)"
 endef
@@ -607,6 +607,10 @@ fulfillment-trust-render-test: helm-deps ## Check verified fulfillment transport
 .PHONY: dev-full-render-test
 dev-full-render-test: helm-deps ## Check dev-full TLS and Helm post-rendering
 	./scripts/test-dev-full-render.sh
+
+.PHONY: kind-runtime-test
+kind-runtime-test: ## Check Kind runtime, sudo, image loading, and cluster cleanup with command stubs
+	python3 scripts/test-kind-runtime.py
 
 .PHONY: helm-validate
 helm-validate: helm-lint csi-render-test helm-networking-test fulfillment-trust-render-test dev-full-render-test ## Validate all charts (lint + template)

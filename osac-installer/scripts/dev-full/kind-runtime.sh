@@ -30,6 +30,7 @@ TOPOLVM_RUNTIME_DIR="/var/lib/osac-dev-full/topolvm"
 TOPOLVM_LVMD_IMAGE="osac-dev/topolvm-lvmd:0.41.1-container"
 TOPOLVM_LVMD_CONTAINER="osac-dev-full-topolvm-lvmd"
 TOPOLVM_LVM_DEVICE_ARGS=(
+  --security-opt label=disable
   --cap-drop=ALL
   --cap-add=SYS_ADMIN
   --cap-add=MKNOD
@@ -62,6 +63,16 @@ err()  { echo -e "${RED}[x]${NC} $*" >&2; }
 info() { echo -e "${BLUE}[i]${NC} $*" >&2; }
 
 # ── Runtime mode detection ───────────────────────────────────────────────────
+sudo_cmd() {
+  if ! command -v sudo >/dev/null 2>&1; then
+    err "Rootful Podman requires sudo or an accessible rootful socket at ${ROOTFUL_SOCKET}."
+    exit 1
+  fi
+  # Let sudo authenticate the actual command, including command-specific
+  # NOPASSWD permissions. It reads passwords from the terminal, not stdin.
+  sudo "$@"
+}
+
 detect_podman_mode() {
   [[ "$KIND_PROVIDER" == "podman" ]] || return 0
   [[ "$(uname -s)" == "Linux" ]] || return 0
@@ -78,20 +89,32 @@ detect_podman_mode() {
        CONTAINER_HOST="unix://${ROOTFUL_SOCKET}" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
     PODMAN_MODE="socket"
     info "Using rootful Podman via ${ROOTFUL_SOCKET}"
+  elif [[ "$(id -u)" == "0" ]] && \
+       podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
+    PODMAN_MODE="root"
+    info "Using local rootful Podman as root"
   elif sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q false; then
     PODMAN_MODE="sudo"
     info "Using local rootful Podman via sudo"
+  elif [[ "${KIND_PROFILE:-}" == "dev-full" ]]; then
+    info "Rootful Podman requires sudo authentication; enter your password if prompted."
+    if sudo_cmd podman info --format '{{.Host.Security.Rootless}}' | grep -q false; then
+      PODMAN_MODE="sudo"
+      info "Using local rootful Podman via sudo"
+    else
+      PODMAN_MODE="rootless"
+    fi
   else
     PODMAN_MODE="rootless"
   fi
 
-  if [[ "${KIND_PROFILE:-}" == "dev-full" && "$PODMAN_MODE" != "socket" && "$PODMAN_MODE" != "sudo" ]]; then
+  if [[ "${KIND_PROFILE:-}" == "dev-full" && "$PODMAN_MODE" != "socket" && "$PODMAN_MODE" != "sudo" && "$PODMAN_MODE" != "root" ]]; then
     err "Kind dev-full requires a reachable rootful Podman engine for the TopoLVM loop device and KubeVirt."
     err "A rootless Podman engine or the socket started by 'systemctl --user start podman.socket' is not sufficient."
     if [[ "$IN_DISTROBOX" == "true" ]]; then
       err "Ask the host administrator to enable ${ROOTFUL_SOCKET} for your user; see scripts/dev-full/manifests/podman-socket-rootful.conf."
     else
-      err "Run 'sudo -v' with a working sudo account, or ask the host administrator to configure an accessible rootful socket at ${ROOTFUL_SOCKET}."
+      err "Check your sudo permissions, or ask the host administrator to configure an accessible rootful socket at ${ROOTFUL_SOCKET}."
     fi
     exit 1
   fi
@@ -118,7 +141,7 @@ kind_cmd() {
       env KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" \
       kind "$@"
   elif [[ "$PODMAN_MODE" == "sudo" ]]; then
-    sudo -n KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
+    sudo_cmd KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
   else
     KIND_EXPERIMENTAL_PROVIDER="${KIND_PROVIDER}" kind "$@"
   fi
@@ -143,7 +166,7 @@ container_cmd() {
   elif [[ "$IN_DISTROBOX" == "true" ]]; then
     podman "$@"
   elif [[ "$PODMAN_MODE" == "sudo" ]]; then
-    sudo -n podman "$@"
+    sudo_cmd podman "$@"
   else
     podman "$@"
   fi
@@ -229,6 +252,9 @@ fi
 
 cat > /runtime/lvmd.yaml <<"EOF"
 socket-name: /run/topolvm/lvmd.sock
+# Run LVM in this helper container instead of entering the host namespaces.
+lvm-command-prefix:
+  - /sbin/lvm
 device-classes:
   - name: vg1
     volume-group: vg1
@@ -243,11 +269,15 @@ EOF'
 }
 
 start_topolvm_lvmd() {
-  local existing_image="" running="false" restart_existing="false" attempt
+  local existing_image="" existing_command_matches="false" container_inspect="" running="false" restart_existing="false" attempt
   if container_cmd inspect "${TOPOLVM_LVMD_CONTAINER}" >/dev/null 2>&1; then
-    existing_image=$(container_cmd inspect "${TOPOLVM_LVMD_CONTAINER}" | jq -r '.[0].Config.Image // empty')
-    running=$(container_cmd inspect "${TOPOLVM_LVMD_CONTAINER}" | jq -r '.[0].State.Running // false')
-    if [[ "${existing_image}" != "${TOPOLVM_LVMD_IMAGE}" ]]; then
+    container_inspect=$(container_cmd inspect "${TOPOLVM_LVMD_CONTAINER}")
+    existing_image=$(jq -r '.[0].Config.Image // empty' <<<"${container_inspect}")
+    existing_command_matches=$(jq -r \
+      '.[0].Config.Cmd == ["/usr/local/bin/lvmd", "--config=/etc/topolvm/lvmd.yaml"]' \
+      <<<"${container_inspect}")
+    running=$(jq -r '.[0].State.Running // false' <<<"${container_inspect}")
+    if [[ "${existing_image}" != "${TOPOLVM_LVMD_IMAGE}" || "${existing_command_matches}" != "true" ]]; then
       container_cmd rm --force "${TOPOLVM_LVMD_CONTAINER}" >/dev/null
       running="false"
     elif [[ "${running}" == "true" ]]; then
@@ -265,7 +295,7 @@ start_topolvm_lvmd() {
       --volume "${TOPOLVM_RUNTIME_DIR}/socket:/run/topolvm" \
       --volume "${TOPOLVM_RUNTIME_DIR}/lvmd.yaml:/etc/topolvm/lvmd.yaml:ro" \
       "${TOPOLVM_LVMD_IMAGE}" \
-      /usr/local/bin/lvmd --container --config=/etc/topolvm/lvmd.yaml >/dev/null
+      /usr/local/bin/lvmd --config=/etc/topolvm/lvmd.yaml >/dev/null
   fi
 
   if [[ "${restart_existing}" == "true" ]] && ! container_cmd exec "${TOPOLVM_LVMD_CONTAINER}" \
@@ -292,6 +322,15 @@ ensure_topolvm_runtime() {
   ensure_topolvm_runtime_dir
   prepare_topolvm_storage
   start_topolvm_lvmd
+}
+
+reset_topolvm_kubelet_credentials() {
+  log "Clearing persisted kubelet PKI before creating a fresh dev-full cluster"
+  container_cmd run --rm \
+    --security-opt label=disable \
+    --cap-drop=ALL \
+    --volume "${TOPOLVM_RUNTIME_DIR}/kubelet:/kubelet" \
+    "${TOPOLVM_LVMD_IMAGE}" rm -rf /kubelet/pki
 }
 
 check_topolvm_cluster_mounts() {
@@ -362,7 +401,10 @@ if [[ -n "$loopdev" ]]; then
   losetup --detach "$loopdev"
 fi
 rm -rf /runtime/*'
+  # Kubelet volumes can contain directories owned by pod users with restrictive
+  # permissions or sticky bits (for example, AWX project checkouts).
   container_cmd run --rm "${TOPOLVM_LVM_DEVICE_ARGS[@]}" \
+    --cap-add=DAC_OVERRIDE --cap-add=FOWNER \
     --volume "${TOPOLVM_RUNTIME_DIR}:/runtime" \
     --volume /dev:/dev \
     "${TOPOLVM_LVMD_IMAGE}" bash -euo pipefail -c "${cleanup_script}"
@@ -479,7 +521,11 @@ create_cluster() {
   # the nodes for one cluster still works and is enough to make this
   # idempotent.
   local nodes
-  if nodes="$(kind_cmd get nodes --name "${name}" 2>/dev/null)" && [[ -n "${nodes}" ]]; then
+  if ! nodes=$(kind_cmd get nodes --name "${name}"); then
+    err "Could not check Kind cluster '${name}'; refusing to reset kubelet credentials or create a cluster."
+    return 1
+  fi
+  if [[ -n "${nodes}" ]]; then
     log "Kind cluster '${name}' already exists, reusing it"
     if [[ "${KIND_PROFILE:-}" == "dev-full" ]]; then
       check_topolvm_cluster_mounts "${name}"
@@ -488,6 +534,7 @@ create_cluster() {
   else
     if [[ "${KIND_PROFILE:-}" == "dev-full" ]]; then
       ensure_topolvm_runtime
+      reset_topolvm_kubelet_credentials
     fi
     log "Creating kind cluster '${name}' (${KIND_PROVIDER})..."
     kind_cmd create cluster --name "${name}" --config "${config}" --wait 60s
@@ -516,8 +563,18 @@ delete_cluster() {
   if [[ "$KIND_PROVIDER" == "podman" ]]; then
     detect_podman_mode
   fi
-  if kind_cmd get clusters 2>/dev/null | grep -Fxq "${name}"; then
-    kind_cmd delete cluster --name "${name}"
+  # As in create_cluster, avoid `kind get clusters` with Podman's JSON labels.
+  # Stop on lookup errors so storage cleanup cannot run against a live cluster.
+  local nodes
+  if ! nodes=$(kind_cmd get nodes --name "${name}"); then
+    err "Could not check Kind cluster '${name}'; refusing to remove its storage."
+    return 1
+  fi
+  if [[ -n "${nodes}" ]]; then
+    if ! kind_cmd delete cluster --name "${name}"; then
+      err "Could not delete Kind cluster '${name}'; refusing to remove its storage."
+      return 1
+    fi
   else
     log "Kind cluster '${name}' does not exist"
   fi

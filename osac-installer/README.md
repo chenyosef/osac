@@ -197,6 +197,10 @@ After changing source code, rerun the relevant component `image-build` target
 and then `kind-load-images`. Loaded images are restarted only for workloads that
 use one of the local image references. Each Go component also exposes a
 single-image `kind-load-image` target when loading only that component is useful.
+Component image-load targets default to `PROFILE=dev-full`; use `PROFILE=dev`
+for an ordinary Kind cluster. Image loading checks the required tools and
+cluster availability without requiring KVM or the virtualization install tools.
+`CONTAINER_TOOL` selects the runtime unless `KIND_EXPERIMENTAL_PROVIDER` is set.
 
 #### CUDN EVPN/Netris E2E environment
 
@@ -252,9 +256,11 @@ so networking resources reconcile to READY without a real fabric (kind has none)
 
 - A **rootful** container runtime, because KubeVirt chowns `/dev/kvm`:
   - **Linux host** — rootful Podman (using `sudo` or an accessible rootful socket) or Docker.
-    For sudo, authenticate once with `sudo -v` before starting the install. Rootless
-    Podman, including the socket started by `systemctl --user start podman.socket`,
-    cannot provide the TopoLVM loop device and volume group used by this profile.
+    Makefile targets and installation scripts prompt for your sudo password when
+    authentication is needed, including after credentials expire during an
+    install. Rootless Podman, including the socket started by
+    `systemctl --user start podman.socket`, cannot provide the TopoLVM loop device
+    and volume group used by this profile.
   - **Linux + Distrobox** — the rootful podman host socket (`/run/podman/podman.sock`);
     install the drop-in at `scripts/dev-full/manifests/podman-socket-rootful.conf`
   - **macOS** — Docker Desktop or Podman Desktop. For Podman, start its machine and
