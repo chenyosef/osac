@@ -343,7 +343,7 @@ AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 .PHONY: install-osac
 install-osac: ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
 	rm -rf $(OSAC_CHART)/charts
-	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 ifneq ($(PLATFORM),kind)
 	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
 	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
@@ -463,7 +463,7 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 helm-deps: ## Build Helm chart dependencies
 	$(MAKE) helm-infra-deps
 	rm -rf $(OSAC_CHART)/charts
-	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 	$(MAKE) helm-devstack-deps
 
 .PHONY: helm-infra-deps
@@ -481,12 +481,12 @@ helm-infra-deps: ## Verify vendored osac-infra Helm dependencies
 .PHONY: helm-topolvm-deps
 helm-topolvm-deps: ## Refresh the vendored TopoLVM chart from its upstream repository
 	helm repo add topolvm $(TOPOLVM_REPO) --force-update
-	helm dependency update --skip-refresh $(INFRA_CHART)
+	helm dependency update $(INFRA_CHART)
 
 .PHONY: helm-devstack-deps
 helm-devstack-deps: ## Build osac-devstack Helm dependencies
 	helm repo add awx-operator $(AWX_OPERATOR_REPO) --force-update
-	helm dependency build --skip-refresh $(CHARTS)/osac-devstack
+	helm dependency build $(CHARTS)/osac-devstack
 
 .PHONY: helm-lint
 helm-lint: helm-deps ## Lint all charts
