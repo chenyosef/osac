@@ -94,18 +94,40 @@ OSAC_CHART     := $(CHARTS)/osac
 # Runtime supplies hostnames and credentials; use the minimal CI fixture for
 # local chart checks without loosening the required-values schema.
 HELM_VALIDATION_VALUES := $(OSAC_CHART)/ci/default-values.yaml
+TOPOLVM_REPO := https://topolvm.github.io/topolvm
+TOPOLVM_CHART_VERSION := 17.2.0
+TOPOLVM_CHART_PACKAGE := $(INFRA_CHART)/charts/topolvm-$(TOPOLVM_CHART_VERSION).tgz
+AWX_OPERATOR_REPO := https://ansible-community.github.io/awx-operator-helm/
+# The osac chart only has local file:// dependencies; ignore user Helm repos.
+LOCAL_HELM_REPOSITORY_CONFIG := /dev/null
+
+# Helm 4 defaults new releases to server-side apply. The devstack chart patches
+# the AWX operator Deployment and AWX itself mutates its CR labels, so keep this
+# release on client-side updates to avoid field ownership conflicts. Helm 3
+# already uses client-side updates and does not support the Helm 4 flag.
+HELM_VERSION_MAJOR := $(shell helm version --template '{{.Version}}' 2>/dev/null | cut -d. -f1 | sed 's/^v//')
+DEVSTACK_HELM_APPLY_ARGS :=
+ifeq ($(HELM_VERSION_MAJOR),4)
+DEVSTACK_HELM_APPLY_ARGS := --server-side=false
+endif
 
 # Values file selection: kind uses kind-specific files, OpenShift uses profile files.
-# dev-full reuses the identical dev control-plane values, plus a small overlay that
-# disables AAP-based networking provisioning (no fabric on kind).
+# dev-full reuses the dev control-plane values, plus an overlay that disables
+# AAP-based networking provisioning and enables its local TopoLVM StorageClass.
 INSTANCE_VALUES_EXTRA :=
+INSTANCE_HELM_ARGS :=
 INFRA_VALUES_EXTRA :=
+INFRA_HELM_ARGS :=
 ifeq ($(PLATFORM),kind)
 INFRA_VALUES    := values/dev/kind-infra.yaml
 INSTANCE_VALUES := values/dev/kind-instance.yaml
 ifeq ($(PROFILE),dev-full)
 INSTANCE_VALUES_EXTRA := -f values/dev/kind-instance-devfull.yaml
+# AWX and the OSAC operator share NS; build the in-cluster URL from the selected namespace.
+INSTANCE_HELM_ARGS := --set-string operator.aap.url=http://awx-service.$(NS).svc.cluster.local:80/api
 INFRA_VALUES_EXTRA := -f values/dev/kind-infra-devfull.yaml
+# Keep the OpenShift LVMS operator off on Kind and enable its TopoLVM CSI path.
+INFRA_HELM_ARGS := --set topolvm.enabled=true --set lvms.enabled=false
 endif
 else ifdef PROFILE
 INFRA_VALUES    := values/$(PROFILE)/infra.yaml
@@ -155,10 +177,15 @@ KIND_RUNTIME_PROVIDER := $(notdir $(CONTAINER_TOOL))
 endif
 endif
 endif
-KIND_RUNTIME_ENV := $(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
+KIND_RUNTIME_ENV := KIND_PROFILE=$(PROFILE) \
+	KIND_OSAC_NAMESPACE=$(NS) \
+	$(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
 KIND_RUNTIME_CMD := $(KIND_RUNTIME_ENV) $(KIND_RUNTIME)
 KIND_CLUSTER_NAME ?= osac-dev
 KIND_CONFIG := kind-config.yaml
+ifeq ($(PROFILE),dev-full)
+KIND_CONFIG := kind-config-dev-full.yaml
+endif
 # dev-full runs its cluster in a separate (rootful) podman daemon; give it a
 # distinct kubeconfig so it never collides with the rootless PROFILE=dev cluster
 # of the same name (both would otherwise share this one file and clobber it).
@@ -176,7 +203,7 @@ export KUBECONFIG := $(or $(KUBECONFIG),$(KIND_KUBECONFIG))
 KIND_UI_IMAGE := ghcr.io/osac-project/osac-ui:latest
 KIND_LOAD_IMAGE_SCRIPT ?= $(abspath scripts/dev-full/kind-load-image.sh)
 define kind-load-ui-image
-	NS="$(NS)" \
+	$(KIND_RUNTIME_ENV) NS="$(NS)" \
 	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" KUBECONFIG="$(KUBECONFIG)" \
 	CONTAINER_TOOL="$(CONTAINER_TOOL)" "$(KIND_LOAD_IMAGE_SCRIPT)" "$(1)"
 endef
@@ -224,7 +251,7 @@ kind-load-images: ## Load previously built dev-full images into Kind (PLATFORM=k
 ##@ Entity: Infra
 
 .PHONY: install-infra
-install-infra: ## Install infrastructure (PLATFORM= PROFILE= NS= required)
+install-infra: helm-infra-deps ## Install infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_CMD) check
@@ -260,6 +287,7 @@ endif
 		--namespace osac-infra --create-namespace \
 		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
+		$(INFRA_HELM_ARGS) \
 		--wait-for-jobs --timeout 30m \
 	|| { echo "=== osac-infra hook jobs ==="; kubectl get jobs,pods,cm -n osac-infra || true; kubectl logs -n osac-infra -l job-name=osac-infra-apply-ca-bundle --tail=200 || true; kubectl get deploy,endpoints,certificate -n cert-manager || true; exit 1; }
 	@for f in ../osac-operator/config/crd/fakes/*.yaml; do \
@@ -321,7 +349,7 @@ AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 .PHONY: install-osac
 install-osac: ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
 	rm -rf $(OSAC_CHART)/charts
-	helm dependency build $(OSAC_CHART)
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
 ifneq ($(PLATFORM),kind)
 	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
 	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
@@ -336,11 +364,12 @@ ifneq ($(PLATFORM),kind)
 	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'))
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: Could not determine cluster domain. Is oc logged in?" >&2; exit 1; }
 endif
-	helm upgrade --install osac $(OSAC_CHART) \
+	@helm upgrade --install osac $(OSAC_CHART) \
 		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) --create-namespace \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(DOMAIN),--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DOMAIN) --set global.clusterDomain=$(DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DOMAIN)/realms/osac) \
+		$(INSTANCE_HELM_ARGS) \
 		$(EXTRA_HELM_ARGS) $(OSAC_HELM_FORCE_CONFLICTS) \
 		--wait --timeout 40m
 
@@ -351,7 +380,7 @@ uninstall-osac: ## Uninstall OSAC instance (PLATFORM= PROFILE= NS= required)
 ##@ Entity: Dev Stack (kind PROFILE=dev-full only)
 
 .PHONY: install-devstack
-install-devstack: ## Install dev-full extras: KubeVirt/CDI/Multus + AWX + UI + seeded catalog
+install-devstack: helm-devstack-deps ## Install dev-full extras: KubeVirt/CDI/Multus + AWX + UI + seeded catalog
 ifneq ($(PLATFORM)/$(PROFILE),kind/dev-full)
 	@echo "ERROR: install-devstack requires PLATFORM=kind PROFILE=dev-full" >&2; exit 1
 endif
@@ -372,6 +401,7 @@ endif
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
 		--post-renderer $(DEV_FULL_HELM_POST_RENDERER) \
 		$(OSAC_HELM_FORCE_CONFLICTS) \
+		$(DEVSTACK_HELM_APPLY_ARGS) \
 		--wait --timeout 30m
 
 ##@ Composite
@@ -438,9 +468,32 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 
 .PHONY: helm-deps
 helm-deps: ## Build Helm chart dependencies
+	$(MAKE) helm-infra-deps
 	rm -rf $(OSAC_CHART)/charts
-	helm dependency build $(OSAC_CHART)
-	helm dependency build charts/osac-devstack
+	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build --skip-refresh $(OSAC_CHART)
+	$(MAKE) helm-devstack-deps
+
+.PHONY: helm-infra-deps
+helm-infra-deps: ## Verify vendored osac-infra Helm dependencies
+	@test -f "$(TOPOLVM_CHART_PACKAGE)" || { \
+		echo "ERROR: packaged TopoLVM chart $(TOPOLVM_CHART_PACKAGE) is missing" >&2; \
+		exit 1; \
+	}
+	@actual_version=$$(helm show chart "$(TOPOLVM_CHART_PACKAGE)" | awk '$$1 == "version:" { version = $$2 } END { print version }'); \
+	if [ "$$actual_version" != "$(TOPOLVM_CHART_VERSION)" ]; then \
+		echo "ERROR: expected TopoLVM chart version $(TOPOLVM_CHART_VERSION), got $$actual_version" >&2; \
+		exit 1; \
+	fi
+
+.PHONY: helm-topolvm-deps
+helm-topolvm-deps: ## Refresh the vendored TopoLVM chart from its upstream repository
+	helm repo add topolvm $(TOPOLVM_REPO) --force-update
+	helm dependency update --skip-refresh $(INFRA_CHART)
+
+.PHONY: helm-devstack-deps
+helm-devstack-deps: ## Build osac-devstack Helm dependencies
+	helm repo add awx-operator $(AWX_OPERATOR_REPO) --force-update
+	helm dependency build --skip-refresh $(CHARTS)/osac-devstack
 
 .PHONY: helm-lint
 helm-lint: helm-deps ## Lint all charts
@@ -560,6 +613,10 @@ dev-full-render-test: helm-deps ## Check dev-full TLS and Helm post-rendering
 .PHONY: openbao-security-context-test
 openbao-security-context-test: ## Check OpenBao securityContext renders numeric UID on Kind, omits on OpenShift
 	./scripts/test-openbao-security-context.sh
+
+.PHONY: kind-runtime-test
+kind-runtime-test: ## Check Kind runtime, sudo, image loading, and cluster cleanup with command stubs
+	python3 scripts/test-kind-runtime.py
 
 .PHONY: helm-validate
 helm-validate: helm-lint csi-render-test helm-networking-test fulfillment-trust-render-test fulfillment-auth-test metering-auth-render-test mce-render-test dev-full-render-test openbao-security-context-test ## Validate all charts (lint + template)
