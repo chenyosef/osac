@@ -101,16 +101,6 @@ AWX_OPERATOR_REPO := https://ansible-community.github.io/awx-operator-helm/
 # The osac chart only has local file:// dependencies; ignore user Helm repos.
 LOCAL_HELM_REPOSITORY_CONFIG := /dev/null
 
-# Helm 4 defaults new releases to server-side apply. The devstack chart patches
-# the AWX operator Deployment and AWX itself mutates its CR labels, so keep this
-# release on client-side updates to avoid field ownership conflicts. Helm 3
-# already uses client-side updates and does not support the Helm 4 flag.
-HELM_VERSION_MAJOR := $(shell helm version --template '{{.Version}}' 2>/dev/null | cut -d. -f1 | sed 's/^v//')
-DEVSTACK_HELM_APPLY_ARGS :=
-ifeq ($(HELM_VERSION_MAJOR),4)
-DEVSTACK_HELM_APPLY_ARGS := --server-side=false
-endif
-
 # Values file selection: kind uses kind-specific files, OpenShift uses profile files.
 # dev-full reuses the dev control-plane values, plus an overlay that disables
 # AAP-based networking provisioning and enables its local TopoLVM StorageClass.
@@ -152,8 +142,12 @@ KIND_RUNTIME_REQUIRED := $(if $(filter true,$(HOST_IS_MAC_ARM)),true,$(if $(filt
 
 # Helm 4 moved post-renderers into plugins; Helm 3 still accepts an executable path.
 HELM_MAJOR := $(shell version=$$(helm version --short 2>/dev/null) || exit; printf '%s\n' "$$version" | sed -nE 's/^v([0-9]+).*/\1/p')
+DEVSTACK_HELM_APPLY_ARGS :=
 ifeq ($(HELM_MAJOR),4)
 DEV_FULL_HELM_POST_RENDERER := osac-dev-full-awx-image
+# AWX mutates its resources, so devstack uses client-side apply. Helm rejects
+# --force-conflicts with this mode, including during initial CRD creation.
+DEVSTACK_HELM_APPLY_ARGS := --server-side=false
 # Helm 4 SSA: AAP operator owns app.kubernetes.io/managed-by on the osac-aap CR.
 OSAC_HELM_FORCE_CONFLICTS := --force-conflicts
 else ifeq ($(HELM_MAJOR),3)
@@ -400,7 +394,6 @@ endif
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
 		--post-renderer $(DEV_FULL_HELM_POST_RENDERER) \
-		$(OSAC_HELM_FORCE_CONFLICTS) \
 		$(DEVSTACK_HELM_APPLY_ARGS) \
 		--wait --timeout 30m
 

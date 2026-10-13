@@ -218,7 +218,8 @@ The `make -C osac-installer kind-runtime-test` unit suite is owned by installer
 implementation work. It uses command stubs to check runtime selection, sudo
 authentication and credential expiry, Makefile/host setup routing, safe
 credential reset, resuming stopped nodes after storage preparation and waiting
-for API readiness, image loading without virtualization prerequisites or
+for API readiness, Helm 3/4 apply flags for devstack and OSAC releases,
+image loading without virtualization prerequisites or
 non-portable temporary-file patterns, and
 device-mapper major detection in the selected engine, refusal of failed or
 invalid probes, replacement of stale helper permissions or images, and cleanup

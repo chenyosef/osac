@@ -165,6 +165,12 @@ the end-to-end "create a VM from the UI" experience:
 make install PLATFORM=kind PROFILE=dev-full NS=osac
 ```
 
+The devstack release uses client-side apply so AWX can manage its resources.
+On Helm 4, the installer passes `--server-side=false` without
+`--force-conflicts`; combining these flags prevents initial AWX CRD creation.
+Helm 3 uses its default client-side behavior. The OSAC platform release retains
+its separate Helm 4 server-side conflict handling.
+
 Rerunning the install reuses the existing Kind cluster and its TopoLVM storage.
 If node containers are stopped (for example, after a host reboot), the installer
 prepares TopoLVM, starts those nodes through the selected container runtime, and

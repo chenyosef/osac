@@ -582,6 +582,34 @@ create_cluster osac-dev config.yaml {shlex.quote(str(kubeconfig))}
         self.assertIn('KIND_PROFILE="dev-full"', result.stdout)
         self.assertNotIn("kind load docker-image", result.stdout)
 
+    def test_installer_helm_apply_flags_match_each_release(self):
+        for version in ("v3.19.0", "v4.2.2"):
+            self.write_command("helm", f"echo {version}")
+            for target, release in (("install-devstack", "osac-devstack"), ("install-osac", "osac")):
+                with self.subTest(version=version, target=target):
+                    result = subprocess.run(
+                        ["make", "--no-print-directory", "-n", "-C", str(INSTALLER),
+                         "-o", "helm-devstack-deps", target, "PLATFORM=kind",
+                         "PROFILE=dev-full", "NS=osac"],
+                        env=self.env, text=True, capture_output=True, timeout=15,
+                    )
+                    self.assert_success(result)
+                    commands = [shlex.split(line) for line in result.stdout.replace("\\\n", " ").splitlines()
+                                if line.startswith("helm upgrade --install ")]
+                    self.assertEqual(len(commands), 1, result.stdout)
+                    args = commands[0]
+                    self.assertEqual(args[3], release)
+                    if release == "osac-devstack":
+                        self.assertNotIn("--force-conflicts", args)
+                        if version.startswith("v4."):
+                            self.assertIn("--server-side=false", args)
+                            self.assertEqual(args[args.index("--post-renderer") + 1], "osac-dev-full-awx-image")
+                        else:
+                            self.assertFalse(any(arg.startswith("--server-side") for arg in args))
+                    else:
+                        self.assertNotIn("--server-side=false", args)
+                        self.assertEqual("--force-conflicts" in args, version.startswith("v4."))
+
     def run_image_load_target(self, target, profile, container_tool):
         return subprocess.run(
             ["make", "--no-print-directory", "-C", str(REPO / "osac-operator"),
