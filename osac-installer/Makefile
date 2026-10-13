@@ -95,8 +95,6 @@ OSAC_CHART     := $(CHARTS)/osac
 # local chart checks without loosening the required-values schema.
 HELM_VALIDATION_VALUES := $(OSAC_CHART)/ci/default-values.yaml
 TOPOLVM_REPO := https://topolvm.github.io/topolvm
-TOPOLVM_CHART_VERSION := 17.2.0
-TOPOLVM_CHART_PACKAGE := $(INFRA_CHART)/charts/topolvm-$(TOPOLVM_CHART_VERSION).tgz
 AWX_OPERATOR_REPO := https://ansible-community.github.io/awx-operator-helm/
 # The osac chart only has local file:// dependencies; ignore user Helm repos.
 LOCAL_HELM_REPOSITORY_CONFIG := /dev/null
@@ -245,7 +243,7 @@ kind-load-images: ## Load previously built dev-full images into Kind (PLATFORM=k
 ##@ Entity: Infra
 
 .PHONY: install-infra
-install-infra: helm-infra-deps ## Install infrastructure (PLATFORM= PROFILE= NS= required)
+install-infra: ## Install infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_CMD) check
@@ -461,22 +459,9 @@ sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 
 .PHONY: helm-deps
 helm-deps: ## Build Helm chart dependencies
-	$(MAKE) helm-infra-deps
 	rm -rf $(OSAC_CHART)/charts
 	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 	$(MAKE) helm-devstack-deps
-
-.PHONY: helm-infra-deps
-helm-infra-deps: ## Verify vendored osac-infra Helm dependencies
-	@test -f "$(TOPOLVM_CHART_PACKAGE)" || { \
-		echo "ERROR: packaged TopoLVM chart $(TOPOLVM_CHART_PACKAGE) is missing" >&2; \
-		exit 1; \
-	}
-	@actual_version=$$(helm show chart "$(TOPOLVM_CHART_PACKAGE)" | awk '$$1 == "version:" { version = $$2 } END { print version }'); \
-	if [ "$$actual_version" != "$(TOPOLVM_CHART_VERSION)" ]; then \
-		echo "ERROR: expected TopoLVM chart version $(TOPOLVM_CHART_VERSION), got $$actual_version" >&2; \
-		exit 1; \
-	fi
 
 .PHONY: helm-topolvm-deps
 helm-topolvm-deps: ## Refresh the vendored TopoLVM chart from its upstream repository
