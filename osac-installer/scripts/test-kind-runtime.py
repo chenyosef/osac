@@ -582,6 +582,73 @@ create_cluster osac-dev config.yaml {shlex.quote(str(kubeconfig))}
         self.assertIn('KIND_PROFILE="dev-full"', result.stdout)
         self.assertNotIn("kind load docker-image", result.stdout)
 
+    def prepare_helm_dependencies(self):
+        installer = self.directory / "installer"
+        infra = installer / "charts/osac-infra"
+        infra.mkdir(parents=True)
+        shutil.copy(INSTALLER / "Makefile", installer / "Makefile")
+        shutil.copy(INSTALLER / "charts/osac-infra/Chart.yaml", infra / "Chart.yaml")
+        version = next(line.split()[1] for line in (infra / "Chart.yaml").read_text().splitlines()
+                       if line.startswith("    version:"))
+        self.archive = infra / "charts" / f"topolvm-{version}.tgz"
+        self.env["MOCK_TOPOLVM_ARCHIVE"] = str(self.archive)
+        self.write_command("helm", """
+if [[ "$*" == 'version --short' ]]; then echo v3.19.0; exit 0; fi
+printf 'helm %s\n' "$*" >> "$MOCK_LOG"
+if [[ "$*" == "${MOCK_HELM_FAILURE:-}" ]]; then exit 1; fi
+if [[ "$*" == 'dependency build charts/osac-infra' ]]; then
+  mkdir -p "$(dirname "$MOCK_TOPOLVM_ARCHIVE")"
+  touch "$MOCK_TOPOLVM_ARCHIVE"
+fi
+""")
+        return installer
+
+    def test_general_helm_dependencies_do_not_download_topolvm(self):
+        installer = self.prepare_helm_dependencies()
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-C", str(installer),
+             "helm-deps", "CONTAINER_TOOL=podman"],
+            env=self.env, text=True, capture_output=True, timeout=15,
+        )
+        self.assert_success(result)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(any("topolvm" in cmd or "charts/osac-infra" in cmd
+                             for cmd in self.commands()))
+
+    def test_helm_lint_downloads_missing_topolvm_and_reuses_it(self):
+        installer = self.prepare_helm_dependencies()
+        # A stale archive must not satisfy the version pinned in Chart.yaml.
+        self.archive.parent.mkdir()
+        (self.archive.parent / "topolvm-0.0.0.tgz").touch()
+        for _ in range(2):
+            result = subprocess.run(
+                ["make", "--no-print-directory", "-C", str(installer),
+                 "helm-lint", "CONTAINER_TOOL=podman"],
+                env=self.env, text=True, capture_output=True, timeout=15,
+            )
+            self.assert_success(result)
+            self.assertTrue(self.archive.is_file())
+        self.assertEqual(self.commands().count("helm dependency build charts/osac-infra"), 1)
+        self.assertEqual(self.commands().count(
+            "helm repo add topolvm https://topolvm.github.io/topolvm --force-update"), 1)
+        self.assertFalse(any("dependency update charts/osac-infra" in cmd for cmd in self.commands()))
+
+    def test_topolvm_dependency_download_failure_stops_install(self):
+        installer = self.prepare_helm_dependencies()
+        for command in ("repo add topolvm https://topolvm.github.io/topolvm --force-update",
+                        "dependency build charts/osac-infra"):
+            with self.subTest(command=command):
+                self.env["MOCK_HELM_FAILURE"] = command
+                result = subprocess.run(
+                    ["make", "--no-print-directory", "-C", str(installer), "install-infra",
+                     "PLATFORM=kind", "PROFILE=dev-full", "NS=osac", "CONTAINER_TOOL=podman"],
+                    env=self.env, text=True, capture_output=True, timeout=15,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"helm {command}", self.commands())
+                self.assertFalse(self.archive.exists())
+                self.assertFalse(any("upgrade --install" in cmd for cmd in self.commands()))
+
     def test_installer_helm_apply_flags_match_each_release(self):
         for version in ("v3.19.0", "v4.2.2"):
             self.write_command("helm", f"echo {version}")

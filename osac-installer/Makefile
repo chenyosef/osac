@@ -95,6 +95,8 @@ OSAC_CHART     := $(CHARTS)/osac
 # local chart checks without loosening the required-values schema.
 HELM_VALIDATION_VALUES := $(OSAC_CHART)/ci/default-values.yaml
 TOPOLVM_REPO := https://topolvm.github.io/topolvm
+TOPOLVM_VERSION := $(shell awk '/- name: topolvm/ {found=1} found && $$1 == "version:" {print $$2; exit}' $(INFRA_CHART)/Chart.yaml)
+TOPOLVM_CHART := $(INFRA_CHART)/charts/topolvm-$(TOPOLVM_VERSION).tgz
 AWX_OPERATOR_REPO := https://ansible-community.github.io/awx-operator-helm/
 # The osac chart only has local file:// dependencies; ignore user Helm repos.
 LOCAL_HELM_REPOSITORY_CONFIG := /dev/null
@@ -243,7 +245,7 @@ kind-load-images: ## Load previously built dev-full images into Kind (PLATFORM=k
 ##@ Entity: Infra
 
 .PHONY: install-infra
-install-infra: ## Install infrastructure (PLATFORM= PROFILE= NS= required)
+install-infra: helm-topolvm-deps ## Install infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_CMD) check
@@ -458,15 +460,17 @@ endif
 sync-charts: helm-deps ## Rebuild chart dependencies (alias for helm-deps)
 
 .PHONY: helm-deps
-helm-deps: ## Build Helm chart dependencies
+helm-deps: ## Build OSAC and devstack Helm chart dependencies
 	rm -rf $(OSAC_CHART)/charts
 	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 	$(MAKE) helm-devstack-deps
 
 .PHONY: helm-topolvm-deps
-helm-topolvm-deps: ## Refresh the vendored TopoLVM chart from its upstream repository
+helm-topolvm-deps: $(TOPOLVM_CHART) ## Download the pinned TopoLVM chart if missing
+
+$(TOPOLVM_CHART):
 	helm repo add topolvm $(TOPOLVM_REPO) --force-update
-	helm dependency update $(INFRA_CHART)
+	helm dependency build $(INFRA_CHART)
 
 .PHONY: helm-devstack-deps
 helm-devstack-deps: ## Build osac-devstack Helm dependencies
@@ -474,20 +478,20 @@ helm-devstack-deps: ## Build osac-devstack Helm dependencies
 	helm dependency build $(CHARTS)/osac-devstack
 
 .PHONY: helm-lint
-helm-lint: helm-deps ## Lint all charts
+helm-lint: helm-deps helm-topolvm-deps ## Lint all charts
 	helm lint $(DEPS_CHART)
 	helm lint $(INFRA_CHART)
 	helm lint $(OSAC_CHART) --values $(HELM_VALIDATION_VALUES)
 
 .PHONY: helm-template
-helm-template: ## Dry-run render all templates
+helm-template: helm-topolvm-deps ## Dry-run render all templates
 	helm template osac-deps $(DEPS_CHART)
 	helm template osac-infra $(INFRA_CHART)
 	helm template osac $(OSAC_CHART) --values $(HELM_VALIDATION_VALUES)
 
 # Schema-error patterns accept Helm 3 dotted paths and Helm 4 JSON pointers.
 .PHONY: csi-render-test
-csi-render-test: helm-deps ## Verify CSI and storage-provider chart rendering
+csi-render-test: helm-deps helm-topolvm-deps ## Verify CSI and storage-provider chart rendering
 	@set -euo pipefail; \
 		caas_render="$$(mktemp)"; \
 		vmaas_render="$$(mktemp)"; \
@@ -577,7 +581,7 @@ metering-auth-render-test: helm-deps ## Check metering service-account auth rend
 	python3 scripts/test-metering-auth-render.py
 
 .PHONY: mce-render-test
-mce-render-test: ## Check disabled MCE defaults, explicit enablement, and CaaS inheritance
+mce-render-test: helm-topolvm-deps ## Check disabled MCE defaults, explicit enablement, and CaaS inheritance
 	uv run --project .. python scripts/test-mce-render.py
 
 .PHONY: fulfillment-auth-test
@@ -585,7 +589,7 @@ fulfillment-auth-test: ## Check Fulfillment service-account token exchange behav
 	./scripts/test-fulfillment-auth.sh
 
 .PHONY: dev-full-render-test
-dev-full-render-test: helm-deps ## Check dev-full TLS and Helm post-rendering
+dev-full-render-test: helm-deps helm-topolvm-deps ## Check dev-full TLS and Helm post-rendering
 	./scripts/test-dev-full-render.sh
 
 .PHONY: openbao-security-context-test
@@ -611,5 +615,5 @@ helm-validate: helm-lint csi-render-test helm-networking-test fulfillment-trust-
 	@echo "Validation passed."
 
 .PHONY: helm-networking-test
-helm-networking-test: helm-deps ## Test networking fabricManager/k8sManager validation and derivation
+helm-networking-test: helm-deps helm-topolvm-deps ## Test networking fabricManager/k8sManager validation and derivation
 	./scripts/test-networking-values.sh

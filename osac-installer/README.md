@@ -122,6 +122,13 @@ In the `osac` mono-repo, component charts are sibling directories referenced via
 make helm-deps
 ```
 
+Infrastructure installation and chart validation download the TopoLVM version pinned in
+[`charts/osac-infra/Chart.yaml`](charts/osac-infra/Chart.yaml) if its
+archive is missing. Downloaded chart archives are ignored by Git.
+`make helm-deps` builds only the OSAC and devstack dependencies. Helm requires
+the TopoLVM archive when rendering or installing `osac-infra`, even when
+`topolvm.enabled` is false; the applicable targets prepare it automatically.
+
 #### 2. Populate Local Secrets
 
 Ensure your values directory contains the necessary secret files:
