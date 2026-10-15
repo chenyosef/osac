@@ -229,7 +229,9 @@ ensure_topolvm_runtime_dir() {
   # Bind mounts need their source directory to exist in the container runtime's
   # Linux filesystem. This also works with remote Docker/Podman Desktop engines,
   # where the path is inside the engine VM rather than on the invoking host.
+  # Do not relabel the whole /var/lib tree to grant the helper write access.
   container_cmd run --rm \
+    --security-opt label=disable \
     --volume /var/lib:/host-var-lib \
     "${TOPOLVM_LVMD_IMAGE}" \
     mkdir -p "/host-var-lib/${runtime_dir_relative}/socket" \

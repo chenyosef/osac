@@ -269,6 +269,21 @@ delete_topolvm_runtime
         self.assertNotIn("--privileged", args)
         self.assertTrue(args[-1].endswith("rm -rf /runtime/*"))
 
+    def test_runtime_dir_creation_disables_selinux_labeling(self):
+        arguments = self.directory / "runtime-dir-arguments"
+        self.env["MOCK_OS"] = "Darwin"
+        self.env["MOCK_RUN_ARGS"] = str(arguments)
+        self.assert_success(self.run_shell('''
+container_cmd() { printf '%s\\0' "$@" > "$MOCK_RUN_ARGS"; }
+ensure_topolvm_runtime_dir
+'''))
+        args = arguments.read_bytes().decode().rstrip("\0").split("\0")
+        self.assertEqual(args[:2], ["run", "--rm"])
+        self.assertEqual(args[2:4], ["--security-opt", "label=disable"])
+        self.assertIn("/var/lib:/host-var-lib", args)
+        self.assertIn("/host-var-lib/osac-dev-full/topolvm/socket", args)
+        self.assertIn("/host-var-lib/osac-dev-full/topolvm/kubelet", args)
+
     def configure_storage_stubs(self, devices="Block devices:\n252 device-mapper\n", *, rule=None,
                                 provider="podman", image="osac-dev/topolvm-lvmd:0.41.1-container-v2"):
         devices_file = self.directory / "proc-devices"
