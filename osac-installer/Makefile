@@ -593,7 +593,7 @@ dev-full-render-test: helm-deps helm-topolvm-deps ## Check dev-full TLS and Helm
 	./scripts/test-dev-full-render.sh
 
 .PHONY: openbao-security-context-test
-openbao-security-context-test: ## Check OpenBao securityContext renders numeric UID on Kind, omits on OpenShift
+openbao-security-context-test: helm-topolvm-deps ## Check OpenBao securityContext renders numeric UID on Kind, omits on OpenShift
 	./scripts/test-openbao-security-context.sh
 
 .PHONY: kind-runtime-test
